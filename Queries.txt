@@ -1,0 +1,45 @@
+create table with srid 3857
+
+create Table trip_paderno_treviolo_t_w_c as
+(select id, ST_Transform(geom, 3857) AS geom from public."trip_paderno_treviolo-T-W-C_tracks")
+
+
+3)
+--comment: create a table for trip's segments, since ST_Split() returns a GEOMETRYCOLLECTION, so we'll need to extract each linestring from the collection through ST_Dump //https://postgis.net/docs/ST_Dump.html --
+create Table trip_paderno_treviolo_segments as
+(select  row_number() over () as id, geom from
+(SELECT(ST_Dump(
+		ST_Split(lineString.geom,
+         (SELECT ST_Collect(changePoint.geom) AS geom FROM public."trip_paderno_treviolo-T-W-C_waypoints" AS changePoint
+		  WHERE ST_Intersects(lineString.geom, changePoint.geom)
+       	 ))
+		)).geom as geom
+FROM public."trip_paderno_treviolo-T-W-C_tracks" AS lineString))
+
+--comment: add columns: start_time, end_time, duration and segment length.
+Alter table trip_paderno_treviolo_segments
+add column start_time timestamp,
+add column end_time timestamp,
+add column duration interval,
+add column "length" double precision
+
+--comment: update each segment through points'data intersected with such a segment. Note that srid 3857 uses meters as unit of measurement
+update trip_paderno_treviolo_segments segment
+set start_time = (select min(time) from public."trip_paderno_treviolo-T-W-C_waypoints" as changePoint
+				 where ST_Intersects(changePoint.geom, segment.geom)),
+end_time = (select max(time) from public."trip_paderno_treviolo-T-W-C_waypoints" as changePoint
+				 where ST_Intersects(changePoint.geom, segment.geom)),
+"length" = ST_length(ST_Transform(geom, 3857))
+
+update trip_paderno_treviolo_segments
+set duration = end_time - start_time
+
+5)
+--comment: epoch represents the total value in seconds
+Select id, geom, "length"/ Extract(epoch from duration) as speed
+from trip_paderno_treviolo_segments
+
+
+
+
+
