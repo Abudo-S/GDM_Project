@@ -34,11 +34,45 @@ end_time = (select max(time) from public."trip_paderno_treviolo-T-W-C_waypoints"
 update trip_paderno_treviolo_segments
 set duration = end_time - start_time
 
+4)
+in point 3, we have already used ST_Transform(geom, 3857) because srid 3857 uses meters as unit of measurement.
+
 5)
 --comment: epoch represents the total value in seconds
 Select id, geom, "length"/ Extract(epoch from duration) as speed
 from trip_paderno_treviolo_segments
 
+OR 
+
+update trip_paderno_treviolo_segments
+set speed = "length"/ Extract(epoch from duration)
+
+6)t = d/s
+
+-a straightforward solution is using k-means, but it doesn't consider the temporal dimension during points' clustering which makes it partially unaccurate regarding the ground truth.
+
+create Table trip_paderno_treviolo_kmeans_clusters
+as (select *,
+ST_ClusterKMeans(geom, 3 ) over() as cluster_id
+from (select geom from
+(select (ST_DumpPoints(ST_Transform(geom, 3857))).geom as geom
+from public."trip_paderno_treviolo-T-W-C_tracks")))
+
+--comment: needs to be ordered by timestamps not id
+select row_number() over () as id, ST_MakeLine(geom order by id) as geom
+from trip_paderno_treviolo_kmeans_clusters
+group by cluster_id
+
+
+create Table trip_paderno_treviolo_segments_points 
+as (select row_number() over () as id, geom,
+	("segment_start_time" + CAST((((ST_Distance("segment_start_point", geom)/"segment_speed") * 1000)::integer) AS interval 'millisecond')) as time
+	from (select seg.start_time as segment_start_time, ST_StartPoint(ST_Transform(seg.geom, 3857)) as segment_start_point,
+	seg.speed as segment_speed,
+	 (ST_DumpPoints(ST_Transform(seg.geom, 3857))).geom as geom
+	from trip_paderno_treviolo_segments as seg
+   )
+)
 
 
 
