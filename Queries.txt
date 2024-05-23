@@ -63,10 +63,10 @@ select row_number() over () as id, ST_MakeLine(geom order by id) as geom
 from trip_paderno_treviolo_kmeans_clusters
 group by cluster_id
 
-
+--comment: extract timestamped points from trip segments.
 create Table trip_paderno_treviolo_segments_points 
 as (select row_number() over () as id, geom,
-	("segment_start_time" + CAST((((ST_Distance("segment_start_point", geom)/"segment_speed") * 1000)::integer) AS interval 'millisecond')) as time
+	to_timestamp(Extract(epoch from "segment_start_time") + (((ST_Distance("segment_start_point", geom)/"segment_speed") * 1000)::integer))::timestamp without time zone as time
 	from (select seg.start_time as segment_start_time, ST_StartPoint(ST_Transform(seg.geom, 3857)) as segment_start_point,
 	seg.speed as segment_speed,
 	 (ST_DumpPoints(ST_Transform(seg.geom, 3857))).geom as geom
