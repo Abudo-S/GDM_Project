@@ -23,7 +23,7 @@ add column end_time timestamp,
 add column duration interval,
 add column "length" double precision
 
---comment: update each segment through points'data intersected with such a segment. Note that srid 3857 uses meters as unit of measurement
+--comment: update each segment through points'data intersected with such a segment. Note that srid 3857 uses meters as unit of measurement.--
 update trip_paderno_treviolo_segments segment
 set start_time = (select min(time) from public."trip_paderno_treviolo-T-W-C_waypoints" as changePoint
 				 where ST_Intersects(changePoint.geom, segment.geom)),
@@ -35,10 +35,10 @@ update trip_paderno_treviolo_segments
 set duration = end_time - start_time
 
 4)
-in point 3, we have already used ST_Transform(geom, 3857) because srid 3857 uses meters as unit of measurement.
+in point 3 and 5, we have already used ST_Transform(geom, 3857) because srid 3857 uses meters as unit of measurement.
 
 5)
---comment: epoch represents the total value in seconds
+--comment: epoch represents the total value in seconds.--
 Select id, geom, "length"/ Extract(epoch from duration) as speed
 from trip_paderno_treviolo_segments
 
@@ -47,10 +47,25 @@ OR
 update trip_paderno_treviolo_segments
 set speed = "length"/ Extract(epoch from duration)
 
-6)t = d/s
+6)
+--comment: since we have already calculated the speed for point (5), so we can determine the mean of transporation based on speed limits. --
+select id, geom, 
+		(case when speed * 3.6 >= 1 and speed * 3.6 <= 20 then 'bicycle or on foot' 
+		 	 when speed * 3.6 >= 20 and speed * 3.6 <= 50 then 'car on urban streets' 
+			 when speed * 3.6 > 50 and speed * 3.6 <= 100 then 'train or extra-urban car'
+	         when speed * 3.6 > 100 and speed * 3.6 <= 160 then 'fast train or highway car'
+	    	 else 'unkown mean'
+		 end) as mean_transportation
+from trip_paderno_treviolo_segments
 
--a straightforward solution is using k-means, but it doesn't consider the temporal dimension during points' clustering which makes it partially unaccurate regarding the ground truth.
 
+6)a)
+the solution isn't forward because first we need to calculate first, for each provided segment: duration, segment length and speed;
+furthermore, this solution takes into consideration the change points signed for any change of transporation, which may not be available in real-life transportation tracking.
+
+considering the k-means directly on the whole points of trajectory:
+
+--comment: an intial solution could be the k-means, but it doesn't consider the temporal dimension during points' clustering which makes it partially unaccurate regarding the ground truth.--
 create Table trip_paderno_treviolo_kmeans_clusters
 as (select *,
 ST_ClusterKMeans(geom, 3 ) over() as cluster_id
@@ -58,22 +73,28 @@ from (select geom from
 (select (ST_DumpPoints(ST_Transform(geom, 3857))).geom as geom
 from public."trip_paderno_treviolo-T-W-C_tracks")))
 
+--comment: extract timestamped points from trip segments (add point time in ms to segment start time in ms then convert to timestamp in seconds).
+--comment: t = d/s
+create Table trip_paderno_treviolo_segments_points 
+as (select row_number() over () as id, geom,
+	to_timestamp(((Extract(epoch from "segment_start_time") * 1000) + (((ST_Distance("segment_start_point", geom)/"segment_speed") * 1000)::integer))/1000)::timestamp without time zone as time
+	from (select seg.start_time as segment_start_time, ST_StartPoint(ST_Transform(seg.geom, 3857)) as segment_start_point,
+	seg.speed as segment_speed,
+	 (ST_DumpPoints(ST_Transform(seg.geom, 3857))).geom as geom
+	from trip_paderno_treviolo_segments as seg
+   ) order by time
+)
+
 --comment: needs to be ordered by timestamps not id
 select row_number() over () as id, ST_MakeLine(geom order by id) as geom
 from trip_paderno_treviolo_kmeans_clusters
 group by cluster_id
 
---comment: extract timestamped points from trip segments.
-create Table trip_paderno_treviolo_segments_points 
-as (select row_number() over () as id, geom,
-	to_timestamp(Extract(epoch from "segment_start_time") + (((ST_Distance("segment_start_point", geom)/"segment_speed") * 1000)::integer))::timestamp without time zone as time
-	from (select seg.start_time as segment_start_time, ST_StartPoint(ST_Transform(seg.geom, 3857)) as segment_start_point,
-	seg.speed as segment_speed,
-	 (ST_DumpPoints(ST_Transform(seg.geom, 3857))).geom as geom
-	from trip_paderno_treviolo_segments as seg
-   )
-)
 
-
-
-
+NOTE: in slow transportation means {bicycle, on foot}, the gps device can capture more points in the same amount of time 
+(ex. in our trip during the 48th second of 20:34, the device has captured 3 points in the same second: "2024-05-20 20:34:48.201", 2024-05-20 20:34:48.443, "2024-05-20 20:34:48.909").
+Meanwhile in faster transporation means {regional train, car}, the gps device captures fewer points in the same amount of time
+(ex. in our trip during the 39th second of 20:24, the device has captured only 1 point in one second: "2024-05-20 20:24:39.699").
+Observation: with slow transportation means we have more captured points per second (more than one point); 
+on the other hand, with faster ones we have few captured captured points per second (one point). 
+So we assume that with airplanes we would have a captured point per n seconds (more than one second).
