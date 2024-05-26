@@ -63,16 +63,6 @@ from trip_paderno_treviolo_segments
 the solution isn't forward because first we need to calculate first, for each provided segment: duration, segment length and speed;
 furthermore, this solution takes into consideration the change points signed for any change of transporation, which may not be available in real-life transportation tracking.
 
-considering the k-means directly on the whole points of trajectory:
-
---comment: an intial solution could be the k-means, but it doesn't consider the temporal dimension during points' clustering which makes it partially unaccurate regarding the ground truth.--
-create Table trip_paderno_treviolo_kmeans_clusters
-as (select *,
-ST_ClusterKMeans(geom, 3 ) over() as cluster_id
-from (select geom from
-(select (ST_DumpPoints(ST_Transform(geom, 3857))).geom as geom
-from public."trip_paderno_treviolo-T-W-C_tracks")))
-
 --comment: extract timestamped points from trip segments (add point time in ms to segment start time in ms then convert to timestamp in seconds).
 --comment: t = d/s
 create Table trip_paderno_treviolo_segments_points 
@@ -85,10 +75,49 @@ as (select row_number() over () as id, geom,
    ) order by time
 )
 
---comment: needs to be ordered by timestamps not id
-select row_number() over () as id, ST_MakeLine(geom order by id) as geom
+
+considering the k-means directly on the whole points of trajectory:
+
+--comment: an intial solution could be the k-means, but it doesn't consider the temporal dimension during points' clustering which makes it partially unaccurate regarding the ground truth.--
+create Table trip_paderno_treviolo_kmeans_clusters
+as (select *,
+ST_ClusterKMeans(geom, 3 ) over() as cluster_id
+from (select geom from
+(select (ST_DumpPoints(ST_Transform(geom, 3857))).geom as geom
+from public."trip_paderno_treviolo-T-W-C_tracks")))
+
+OR (more correct)
+
+create Table trip_paderno_treviolo_kmeans_clusters
+as (select *,
+ST_ClusterKMeans(geom, 3 ) over() as cluster_id
+from (select * from trip_paderno_treviolo_segments_points))
+
+
+--comment: needs to be ordered by timestamps not id--
+select row_number() over () as id, ST_MakeLine(geom order by time) as geom
 from trip_paderno_treviolo_kmeans_clusters
 group by cluster_id
+
+--comment: calculate cluster_speed--
+update trip_paderno_treviolo_kmeans_clusters as clustered_point
+set cluster_speed = cluster.cluster_speed
+from (select cluster.cluster_id, ST_Distance((select geom FROM trip_paderno_treviolo_kmeans_clusters where cluster_id = cluster.cluster_id order by time desc LIMIT 1), 
+(select geom FROM trip_paderno_treviolo_kmeans_clusters where cluster_id = cluster.cluster_id order by time asc LIMIT 1))
+/Extract(epoch from (max(cluster.time) - min(cluster.time))) as cluster_speed
+from trip_paderno_treviolo_kmeans_clusters as cluster
+group by cluster.cluster_id) as cluster
+where cluster.cluster_id = clustered_point.cluster_id
+
+--comment: assign cluster transportation mean--
+select id, geom, 
+		(case when cluster_speed * 3.6 >= 1 and cluster_speed * 3.6 <= 20 then 'bicycle or on foot' 
+		 	 when cluster_speed * 3.6 >= 20 and cluster_speed * 3.6 <= 50 then 'car on urban streets' 
+			 when cluster_speed * 3.6 > 50 and cluster_speed * 3.6 <= 100 then 'train or extra-urban car'
+	         when cluster_speed * 3.6 > 100 and cluster_speed * 3.6 <= 160 then 'fast train or highway car'
+	    	 else 'unkown mean'
+		 end) as mean_transport
+from trip_paderno_treviolo_kmeans_clusters 
 
 
 NOTE: in slow transportation means {bicycle, on foot}, the gps device can capture more points in the same amount of time 
